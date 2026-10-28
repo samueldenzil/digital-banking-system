@@ -32,5 +32,13 @@ public interface AccountService {
      */
     AccountResponse debitAccount(String accountNumber, BigDecimal amount);
 
+    /**
+     * Credit balance
+     * Called by Transaction Service via Kafka
+     * 
+     * @param accountNumber
+     * @param amount
+     * @return
+     */
     AccountResponse creditAccount(String accountNumber, BigDecimal amount);
 }

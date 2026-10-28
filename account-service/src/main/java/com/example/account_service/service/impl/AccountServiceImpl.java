@@ -6,13 +6,16 @@ import java.util.List;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.example.account_service.dto.AccountResponse;
 import com.example.account_service.dto.CreateAccountRequest;
 import com.example.account_service.entity.Account;
 import com.example.account_service.entity.AccountStatus;
 import com.example.account_service.entity.AccountType;
+import com.example.account_service.exception.AccountInactiveException;
 import com.example.account_service.exception.AccountNotFoundException;
+import com.example.account_service.exception.InsufficientBalanceException;
 import com.example.account_service.repository.AccountRepository;
 import com.example.account_service.service.AccountService;
 
@@ -20,6 +23,7 @@ import lombok.RequiredArgsConstructor;
 
 @Service
 @RequiredArgsConstructor
+@Transactional(readOnly = true)
 public class AccountServiceImpl implements AccountService {
 
     private final AccountRepository accountRepository;
@@ -61,18 +65,53 @@ public class AccountServiceImpl implements AccountService {
     }
 
     @Override
+    @Transactional
     public AccountResponse debitAccount(String accountNumber, BigDecimal amount) {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'debitAccount'");
+        Account account = accountRepository.findByAccountNumberForUpdate(accountNumber).orElseThrow(
+                () -> new AccountNotFoundException("Account not found for account number: " + accountNumber));
+
+        if (account.getStatus() != AccountStatus.ACTIVE) {
+            throw new AccountInactiveException("Account is not active: " + accountNumber);
+        }
+
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Debit amount must be greater than zero: " + amount);
+        }
+
+        // TODO: Verify cumulative daily transaction limit against
+        // account.getDailyTransactionLimit()
+
+        if (account.getBalance().compareTo(amount) < 0) {
+            throw new InsufficientBalanceException("Insufficient balance for account number: " + accountNumber);
+        }
+
+        account.setBalance(account.getBalance().subtract(amount));
+
+        Account savedAccount = accountRepository.save(account);
+
+        return AccountResponse.fromEntity(savedAccount);
     }
 
     @Override
+    @Transactional
     public AccountResponse creditAccount(String accountNumber, BigDecimal amount) {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'creditAccount'");
+        Account account = accountRepository.findByAccountNumberForUpdate(accountNumber)
+                .orElseThrow(
+                        () -> new AccountNotFoundException("Account not found for account number: " + accountNumber));
+
+        if (account.getStatus() != AccountStatus.ACTIVE) {
+            throw new AccountInactiveException("Account is not active: " + accountNumber);
+        }
+
+        account.setBalance(account.getBalance().add(amount));
+
+        Account savedAccount = accountRepository.save(account);
+
+        return AccountResponse.fromEntity(savedAccount);
     }
 
     @Override
+    @Transactional
     public void blockAccount(String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(
@@ -83,6 +122,7 @@ public class AccountServiceImpl implements AccountService {
     }
 
     @Override
+    @Transactional
     public void unblockAccount(String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(
