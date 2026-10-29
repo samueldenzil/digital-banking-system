@@ -31,6 +31,7 @@ public class AccountServiceImpl implements AccountService {
     private static SecureRandom secureRandom = new SecureRandom();
 
     @Override
+    @Transactional
     public AccountResponse createAccount(CreateAccountRequest request) {
         List<Account> existingAccounts = accountRepository.findByEmail(request.getEmail());
 
@@ -103,6 +104,10 @@ public class AccountServiceImpl implements AccountService {
             throw new AccountInactiveException("Account is not active: " + accountNumber);
         }
 
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Credit amount must be greater than zero: " + amount);
+        }
+
         account.setBalance(account.getBalance().add(amount));
 
         Account savedAccount = accountRepository.save(account);
@@ -141,8 +146,8 @@ public class AccountServiceImpl implements AccountService {
         String accountNumber;
 
         do {
-            long random = secureRandom.nextLong(1_000_000_000_000L);
-            accountNumber = String.format("%012d", random);
+            long random = 100_000_000_000L + secureRandom.nextLong(900_000_000_000L);
+            accountNumber = String.valueOf(random);
         } while (accountRepository.existsByAccountNumber(accountNumber));
 
         return accountNumber;
