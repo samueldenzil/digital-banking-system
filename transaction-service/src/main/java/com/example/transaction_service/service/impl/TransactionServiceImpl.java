@@ -1,12 +1,9 @@
 package com.example.transaction_service.service.impl;
 
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
-import com.example.transaction_service.event.TransactionInitiatedEvent;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -20,6 +17,9 @@ import com.example.transaction_service.dto.TransactionResponse;
 import com.example.transaction_service.entity.Transaction;
 import com.example.transaction_service.entity.TransactionStatus;
 import com.example.transaction_service.entity.TransactionType;
+import com.example.transaction_service.event.TransactionCompletedEvent;
+import com.example.transaction_service.event.TransactionInitiatedEvent;
+import com.example.transaction_service.event.TransactionRefundedEvent;
 import com.example.transaction_service.repository.TransactionRepository;
 import com.example.transaction_service.service.TransactionService;
 
@@ -39,13 +39,16 @@ public class TransactionServiceImpl implements TransactionService {
     private final TransactionRepository transactionRepository;
     private final AccountServiceClient accountServiceClient;
     private final StringRedisTemplate redisTemplate;
-    private final KafkaTemplate<String, Object>  kafkaTemplate;
+    private final KafkaTemplate<String, Object> kafkaTemplate;
 
     private static final String TRANSACTION_INITIATED_TOPIC = "transaction.initiated";
+    private static final String TRANSACTION_REFUNDED_TOPIC = "transaction.refunded";
+    private static final String TRANSACTION_COMPLETED_TOPIC = "transaction.completed";
 
     @Override
     public TransactionResponse createTransaction(TransactionRequest request) {
-        // 1. Idempotency Check: Prevent duplicate transactions caused by client network retries
+        // 1. Idempotency Check: Prevent duplicate transactions caused by client network
+        // retries
         if (request.idempotencyKey() != null && !request.idempotencyKey().isBlank()) {
             var existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
             if (existing.isPresent()) {
@@ -59,7 +62,8 @@ public class TransactionServiceImpl implements TransactionService {
             throw new IllegalArgumentException("Source and target accounts cannot be the same");
         }
 
-        // 3. Pre-flight Validation: Query Account Service via OpenFeign to verify accounts
+        // 3. Pre-flight Validation: Query Account Service via OpenFeign to verify
+        // accounts
         AccountResponse sourceAccount = accountServiceClient.getAccount(request.sourceAccountNumber());
         AccountResponse targetAccount = accountServiceClient.getAccount(request.targetAccountNumber());
 
@@ -67,7 +71,8 @@ public class TransactionServiceImpl implements TransactionService {
             throw new IllegalArgumentException("Source or target account not found");
         }
 
-        // 4. Currency Check: Ensure source and target accounts match the transfer currency
+        // 4. Currency Check: Ensure source and target accounts match the transfer
+        // currency
         if (!sourceAccount.currency().equalsIgnoreCase(request.currency()) ||
                 !targetAccount.currency().equalsIgnoreCase(request.currency())) {
             throw new IllegalArgumentException("Currency mismatch between transfer and accounts");
@@ -101,15 +106,9 @@ public class TransactionServiceImpl implements TransactionService {
                 savedTransaction.getAmount(),
                 savedTransaction.getCurrency(),
                 savedTransaction.getType(),
-                Instant.now()
-        );
+                Instant.now());
 
-        kafkaTemplate.send(TRANSACTION_INITIATED_TOPIC, transaction.getId().toString(), event);
-
-        // 8. Generate a 6-digit OTP and cache in Redis with a 5-minute expiration (TTL)
-        String otp = String.format("%06d", new SecureRandom().nextInt(1_000_000));
-        log.info("Generated OTP for transaction {}: {}", savedTransaction.getId(), otp);
-        redisTemplate.opsForValue().set("otp:" + savedTransaction.getId(), otp, 5, TimeUnit.MINUTES);
+        kafkaTemplate.send(TRANSACTION_INITIATED_TOPIC, savedTransaction.getId().toString(), event);
 
         return TransactionResponse.fromEntity(savedTransaction);
     }
@@ -125,7 +124,8 @@ public class TransactionServiceImpl implements TransactionService {
 
     @Override
     public List<TransactionResponse> getTransactionsByAccountNumber(String accountNumber) {
-        // Retrieve transaction history for an account (both sent and received), newest first
+        // Retrieve transaction history for an account (both sent and received), newest
+        // first
         return transactionRepository
                 .findBySourceAccountNumberOrTargetAccountNumberOrderByCreatedAtDesc(accountNumber, accountNumber)
                 .stream()
@@ -139,7 +139,7 @@ public class TransactionServiceImpl implements TransactionService {
         Transaction transaction = transactionRepository.findById(UUID.fromString(request.transactionId()))
                 .orElseThrow(() -> new IllegalArgumentException("Transaction not found"));
 
-        if (transaction.getStatus() != TransactionStatus.PENDING) {
+        if (transaction.getStatus() != TransactionStatus.PENDING_VERIFICATION) {
             throw new IllegalArgumentException("Transaction is already processed");
         }
 
@@ -150,7 +150,8 @@ public class TransactionServiceImpl implements TransactionService {
             throw new IllegalArgumentException("Invalid or expired OTP");
         }
 
-        // 3. Immediately delete OTP from Redis to prevent replay attacks (submitting same OTP twice)
+        // 3. Immediately delete OTP from Redis to prevent replay attacks (submitting
+        // same OTP twice)
         redisTemplate.delete("otp:" + request.transactionId());
 
         // 4. SAGA Step 1: Deduct balance from sender account via OpenFeign
@@ -158,7 +159,6 @@ public class TransactionServiceImpl implements TransactionService {
             accountServiceClient.deductBalance(transaction.getSourceAccountNumber(),
                     new TransactionAmountRequest(transaction.getAmount()));
         } catch (Exception e) {
-            // If deduction fails, update status to FAILED with reason so transaction is not left as PENDING
             log.error("Failed to deduct balance for transaction {}: {}", transaction.getId(), e.getMessage());
             transaction.setStatus(TransactionStatus.FAILED);
             transaction.setFailureReason("Debit failed: " + e.getMessage());
@@ -166,10 +166,48 @@ public class TransactionServiceImpl implements TransactionService {
             throw e;
         }
 
-        // 5. Update transaction state to PROCESSING (funds deducted, ready for fraud check & crediting)
-        transaction.setStatus(TransactionStatus.PROCESSING);
+        // 5. SAGA Step 2: Settle by crediting the recipient account
+        try {
+            accountServiceClient.creditBalance(transaction.getTargetAccountNumber(),
+                    new TransactionAmountRequest(transaction.getAmount()));
+        } catch (Exception e) {
+            // Compensation: If crediting recipient fails, refund sender immediately
+            log.error("Failed to credit target account for transaction {}. Initiating refund compensation: {}",
+                    transaction.getId(), e.getMessage());
+            try {
+                accountServiceClient.creditBalance(transaction.getSourceAccountNumber(),
+                        new TransactionAmountRequest(transaction.getAmount()));
+                transaction.setStatus(TransactionStatus.REFUNDED);
+                transaction.setFailureReason("Target credit failed. Sender refunded: " + e.getMessage());
+                kafkaTemplate.send(TRANSACTION_REFUNDED_TOPIC, transaction.getId().toString(),
+                        new TransactionRefundedEvent(transaction.getId(), transaction.getSourceAccountNumber(),
+                                transaction.getAmount(), transaction.getFailureReason(), Instant.now()));
+            } catch (Exception refundEx) {
+                log.error("CRITICAL: Failed to compensate/refund sender for transaction {}: {}",
+                        transaction.getId(), refundEx.getMessage());
+                transaction.setStatus(TransactionStatus.FAILED);
+                transaction.setFailureReason("Settlement failed and compensation failed: " + refundEx.getMessage());
+            }
+            transactionRepository.save(transaction);
+            throw e;
+        }
+
+        // 6. Complete the transaction
+        transaction.setStatus(TransactionStatus.SUCCESS);
+        transaction.setCompletedAt(java.time.LocalDateTime.now());
         Transaction savedTransaction = transactionRepository.save(transaction);
 
+        // Publish real TransactionCompletedEvent now that money has actually moved!
+        kafkaTemplate.send(TRANSACTION_COMPLETED_TOPIC, savedTransaction.getId().toString(),
+                new TransactionCompletedEvent(
+                        savedTransaction.getId(),
+                        savedTransaction.getSourceAccountNumber(),
+                        savedTransaction.getTargetAccountNumber(),
+                        savedTransaction.getAmount(),
+                        Instant.now()
+                ));
+
+        log.info("Transaction {} successfully verified and settled via OTP.", savedTransaction.getId());
         return TransactionResponse.fromEntity(savedTransaction);
     }
 }
