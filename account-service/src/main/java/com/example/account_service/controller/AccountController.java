@@ -62,16 +62,27 @@ public class AccountController {
     }
 
     /**
-     * SAGA Step 4 - Compensating transaction endpoint
-     * CALLED BY TRANSACTION SERVICE in TWO SCENARIOS:
-     * 1. Fraud detection -> refund sender (undo step 1)
-     * 2. Transaction completed -> Credit receiver
+     * SAGA Step 4 - Credit receiver endpoint
+     * Called by Transaction Service when transaction completes successfully
      */
     @PutMapping("/{accountNumber}/credit")
     public ResponseEntity<AccountResponse> creditBalance(
             @PathVariable String accountNumber,
             @Valid @RequestBody TransactionAmountRequest request) {
         AccountResponse response = accountService.creditAccount(accountNumber, request.amount());
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * SAGA Compensating transaction endpoint - Refund Sender
+     * Called by Transaction Service when downstream validation, fraud check, or crediting fails.
+     * Permitted on FROZEN accounts.
+     */
+    @PutMapping("/{accountNumber}/refund")
+    public ResponseEntity<AccountResponse> refundBalance(
+            @PathVariable String accountNumber,
+            @Valid @RequestBody TransactionAmountRequest request) {
+        AccountResponse response = accountService.refundAccount(accountNumber, request.amount());
         return ResponseEntity.ok(response);
     }
 

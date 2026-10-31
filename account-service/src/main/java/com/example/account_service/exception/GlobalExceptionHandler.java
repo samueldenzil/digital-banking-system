@@ -2,6 +2,7 @@ package com.example.account_service.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -97,6 +98,18 @@ public class GlobalExceptionHandler {
                 return buildErrorResponse(
                                 HttpStatus.CONFLICT,
                                 "Account was modified by another transaction. Please retry.",
+                                request.getRequestURI(),
+                                Map.of());
+        }
+
+        @ExceptionHandler(DataIntegrityViolationException.class)
+        public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(
+                        DataIntegrityViolationException ex,
+                        HttpServletRequest request) {
+                log.warn("Data integrity/unique constraint conflict on path {}: {}", request.getRequestURI(), ex.getMessage());
+                return buildErrorResponse(
+                                HttpStatus.CONFLICT,
+                                "A uniqueness conflict occurred (e.g. concurrent account number generation). Please retry the request.",
                                 request.getRequestURI(),
                                 Map.of());
         }

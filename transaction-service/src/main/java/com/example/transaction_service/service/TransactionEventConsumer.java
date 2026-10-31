@@ -74,7 +74,6 @@ public class TransactionEventConsumer {
         redisTemplate.opsForValue().set("otp:" + transaction.getId(), otp, 5, TimeUnit.MINUTES);
 
         transaction.setStatus(TransactionStatus.PENDING_VERIFICATION);
-
         transactionRepository.save(transaction);
 
         log.info("Step-Up Challenge: Generated OTP for flagged transaction {}: {}", transaction.getId(), otp);
@@ -92,8 +91,7 @@ public class TransactionEventConsumer {
     }
 
     /**
-     * Handles FraudCheckClearedEvent when a transaction is deemed
-     * clean/low-risk.
+     * Handles FraudCheckClearedEvent when a transaction is deemed clean/low-risk.
      * Settles the transaction by crediting the destination account.
      */
     @KafkaListener(topics = FRAUD_CLEARED_TOPIC, groupId = "transaction-service-group")
@@ -152,7 +150,7 @@ public class TransactionEventConsumer {
             log.error("Credit failed for transaction {}. Executing refund compensation: {}", transaction.getId(),
                     e.getMessage());
             try {
-                accountServiceClient.creditBalance(
+                accountServiceClient.refundBalance(
                         transaction.getSourceAccountNumber(),
                         new TransactionAmountRequest(transaction.getAmount()));
                 transaction.setStatus(TransactionStatus.REFUNDED);

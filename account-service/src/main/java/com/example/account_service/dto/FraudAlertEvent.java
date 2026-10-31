@@ -1,10 +1,13 @@
 package com.example.account_service.dto;
 
-import java.time.LocalDateTime;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.UUID;
 
 public record FraudAlertEvent(
-        String transactionId,
-        String accountNumber,
-        String reason,
-        LocalDateTime timestamp) {
+                UUID transactionId,
+                String accountNumber,
+                BigDecimal amount,
+                String reason,
+                Instant timestamp) {
 }

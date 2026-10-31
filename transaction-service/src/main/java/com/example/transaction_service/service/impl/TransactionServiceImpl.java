@@ -175,7 +175,7 @@ public class TransactionServiceImpl implements TransactionService {
             log.error("Failed to credit target account for transaction {}. Initiating refund compensation: {}",
                     transaction.getId(), e.getMessage());
             try {
-                accountServiceClient.creditBalance(transaction.getSourceAccountNumber(),
+                accountServiceClient.refundBalance(transaction.getSourceAccountNumber(),
                         new TransactionAmountRequest(transaction.getAmount()));
                 transaction.setStatus(TransactionStatus.REFUNDED);
                 transaction.setFailureReason("Target credit failed. Sender refunded: " + e.getMessage());
@@ -204,8 +204,7 @@ public class TransactionServiceImpl implements TransactionService {
                         savedTransaction.getSourceAccountNumber(),
                         savedTransaction.getTargetAccountNumber(),
                         savedTransaction.getAmount(),
-                        Instant.now()
-                ));
+                        Instant.now()));
 
         log.info("Transaction {} successfully verified and settled via OTP.", savedTransaction.getId());
         return TransactionResponse.fromEntity(savedTransaction);

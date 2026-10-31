@@ -34,11 +34,22 @@ public interface AccountService {
 
     /**
      * Credit balance
-     * Called by Transaction Service via Kafka
+     * Called by Transaction Service or deposit workflow
      * 
      * @param accountNumber
      * @param amount
      * @return
      */
     AccountResponse creditAccount(String accountNumber, BigDecimal amount);
+
+    /**
+     * SAGA compensating transaction: refund previously debited amount.
+     * Permitted on both ACTIVE and FROZEN accounts (e.g. after a fraud detection alert
+     * freezes the sender account during mid-transaction).
+     *
+     * @param accountNumber
+     * @param amount
+     * @return
+     */
+    AccountResponse refundAccount(String accountNumber, BigDecimal amount);
 }

@@ -20,4 +20,7 @@ public interface AccountServiceClient {
 
     @PutMapping("/api/v1/accounts/{accountNumber}/credit")
     AccountResponse creditBalance(@PathVariable String accountNumber, @RequestBody TransactionAmountRequest request);
+
+    @PutMapping("/api/v1/accounts/{accountNumber}/refund")
+    AccountResponse refundBalance(@PathVariable String accountNumber, @RequestBody TransactionAmountRequest request);
 }

@@ -12,7 +12,6 @@ import com.example.account_service.dto.AccountResponse;
 import com.example.account_service.dto.CreateAccountRequest;
 import com.example.account_service.entity.Account;
 import com.example.account_service.entity.AccountStatus;
-import com.example.account_service.entity.AccountType;
 import com.example.account_service.exception.AccountInactiveException;
 import com.example.account_service.exception.AccountNotFoundException;
 import com.example.account_service.exception.InsufficientBalanceException;
@@ -20,15 +19,17 @@ import com.example.account_service.repository.AccountRepository;
 import com.example.account_service.service.AccountService;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 @Transactional(readOnly = true)
 public class AccountServiceImpl implements AccountService {
 
     private final AccountRepository accountRepository;
 
-    private static SecureRandom secureRandom = new SecureRandom();
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     @Override
     @Transactional
@@ -41,8 +42,13 @@ public class AccountServiceImpl implements AccountService {
                 .orElse(generateCustomerId());
         account.setAccountNumber(generateAccountNumber());
         account.setCustomerId(customerId);
-        account.setDailyTransactionLimit(
-                account.getType() == AccountType.SAVINGS ? BigDecimal.valueOf(100000) : BigDecimal.valueOf(500000));
+
+        // Assign default daily transaction limit based on account type domain
+        // specifications
+        BigDecimal dailyLimit = account.getType() != null
+                ? account.getType().getDefaultDailyLimit()
+                : BigDecimal.valueOf(100_000);
+        account.setDailyTransactionLimit(dailyLimit);
 
         Account savedAccount = accountRepository.save(account);
 
@@ -100,8 +106,11 @@ public class AccountServiceImpl implements AccountService {
                 .orElseThrow(
                         () -> new AccountNotFoundException("Account not found for account number: " + accountNumber));
 
-        if (account.getStatus() != AccountStatus.ACTIVE) {
-            throw new AccountInactiveException("Account is not active: " + accountNumber);
+        // In banking, Post-No-Debit (FROZEN) accounts can still receive incoming
+        // credits/deposits;
+        // only CLOSED accounts strictly reject deposits.
+        if (account.getStatus() == AccountStatus.CLOSED) {
+            throw new AccountInactiveException("Cannot credit closed account: " + accountNumber);
         }
 
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
@@ -111,6 +120,31 @@ public class AccountServiceImpl implements AccountService {
         account.setBalance(account.getBalance().add(amount));
 
         Account savedAccount = accountRepository.save(account);
+        log.info("Credited {} to account {} (Status: {})", amount, accountNumber, account.getStatus());
+
+        return AccountResponse.fromEntity(savedAccount);
+    }
+
+    @Override
+    @Transactional
+    public AccountResponse refundAccount(String accountNumber, BigDecimal amount) {
+        Account account = accountRepository.findByAccountNumberForUpdate(accountNumber)
+                .orElseThrow(
+                        () -> new AccountNotFoundException("Account not found for account number: " + accountNumber));
+
+        if (account.getStatus() == AccountStatus.CLOSED) {
+            throw new AccountInactiveException("Cannot refund closed account: " + accountNumber);
+        }
+
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Refund amount must be greater than zero: " + amount);
+        }
+
+        account.setBalance(account.getBalance().add(amount));
+
+        Account savedAccount = accountRepository.save(account);
+        log.info("SAGA compensation refund: credited {} back to account {} (Status: {})",
+                amount, accountNumber, account.getStatus());
 
         return AccountResponse.fromEntity(savedAccount);
     }
@@ -146,7 +180,7 @@ public class AccountServiceImpl implements AccountService {
         String accountNumber;
 
         do {
-            long random = 100_000_000_000L + secureRandom.nextLong(900_000_000_000L);
+            long random = 100_000_000_000L + SECURE_RANDOM.nextLong(900_000_000_000L);
             accountNumber = String.valueOf(random);
         } while (accountRepository.existsByAccountNumber(accountNumber));
 
