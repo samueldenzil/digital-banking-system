@@ -1,5 +1,5 @@
 server:
-  port: 8084
+  port: 8083
 
 spring:
   application:
@@ -41,6 +41,10 @@ spring:
 stripe:
   api-key: ${STRIPE_API_KEY:sk_test_mock_dummy_key}
   webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_dummy}
+
+# Cors Configuration
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
 
 # Spring Boot Actuator Configuration (Health & Info Checkpoints)
 management:

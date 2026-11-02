@@ -17,6 +17,7 @@ import com.example.payment_service.dto.PaymentResponse;
 import com.example.payment_service.entity.Payment;
 import com.example.payment_service.entity.PaymentStatus;
 import com.example.payment_service.event.PaymentCompletedEvent;
+import com.example.payment_service.event.PaymentFailedEvent;
 import com.example.payment_service.repository.PaymentRepository;
 import com.example.payment_service.service.PaymentService;
 import com.stripe.Stripe;
@@ -146,6 +147,18 @@ public class PaymentServiceImpl implements PaymentService {
         log.warn("Payment failed for transaction {} (Intent: {}): reason={}",
                 saved.getTransactionId(), stripePaymentIntentId, failureReason);
 
+        PaymentFailedEvent event = new PaymentFailedEvent(
+                saved.getId(),
+                saved.getTransactionId(),
+                saved.getAccountNumber(),
+                saved.getAmount(),
+                saved.getCurrency(),
+                saved.getStripePaymentIntentId(),
+                saved.getFailureReason(),
+                Instant.now());
+
+        kafkaTemplate.send("payment.failed", saved.getTransactionId().toString(), event);
+
         return PaymentResponse.fromEntity(saved);
     }
 
@@ -168,8 +181,14 @@ public class PaymentServiceImpl implements PaymentService {
         log.info("Payment confirmed successfully for transaction {} (Intent: {})",
                 saved.getTransactionId(), stripePaymentIntentId);
 
-        PaymentCompletedEvent event = new PaymentCompletedEvent(payment.getId(), payment.getTransactionId(),
-                payment.getAccountNumber(), payment.getAmount(), payment.getCurrency(), Instant.now());
+        PaymentCompletedEvent event = new PaymentCompletedEvent(
+                saved.getId(),
+                saved.getTransactionId(),
+                saved.getAccountNumber(),
+                saved.getAmount(),
+                saved.getCurrency(),
+                saved.getStripePaymentIntentId(),
+                Instant.now());
 
         kafkaTemplate.send("payment.completed", saved.getTransactionId().toString(), event);
 
