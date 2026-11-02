@@ -7,6 +7,7 @@ import java.util.UUID;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.example.transaction_service.client.AccountServiceClient;
 import com.example.transaction_service.client.dto.AccountResponse;
@@ -23,6 +24,7 @@ import com.example.transaction_service.event.TransactionRefundedEvent;
 import com.example.transaction_service.repository.TransactionRepository;
 import com.example.transaction_service.service.TransactionService;
 
+import feign.FeignException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -34,6 +36,7 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 @RequiredArgsConstructor
 @Slf4j
+@Transactional(readOnly = true)
 public class TransactionServiceImpl implements TransactionService {
 
     private final TransactionRepository transactionRepository;
@@ -46,6 +49,7 @@ public class TransactionServiceImpl implements TransactionService {
     private static final String TRANSACTION_COMPLETED_TOPIC = "transaction.completed";
 
     @Override
+    @Transactional
     public TransactionResponse createTransaction(TransactionRequest request) {
         // 1. Idempotency Check: Prevent duplicate transactions caused by client network
         // retries
@@ -64,12 +68,8 @@ public class TransactionServiceImpl implements TransactionService {
 
         // 3. Pre-flight Validation: Query Account Service via OpenFeign to verify
         // accounts
-        AccountResponse sourceAccount = accountServiceClient.getAccount(request.sourceAccountNumber());
-        AccountResponse targetAccount = accountServiceClient.getAccount(request.targetAccountNumber());
-
-        if (sourceAccount == null || targetAccount == null) {
-            throw new IllegalArgumentException("Source or target account not found");
-        }
+        AccountResponse sourceAccount = fetchAccount(request.sourceAccountNumber(), "Source");
+        AccountResponse targetAccount = fetchAccount(request.targetAccountNumber(), "Target");
 
         // 4. Currency Check: Ensure source and target accounts match the transfer
         // currency
@@ -92,7 +92,7 @@ public class TransactionServiceImpl implements TransactionService {
         Transaction transaction = request.toEntity();
         String referenceNumber = "TXN-" + System.currentTimeMillis() + "-"
                 + UUID.randomUUID().toString().substring(0, 6).toUpperCase();
-        transaction.setType(TransactionType.TRANSFER);
+        transaction.setType(request.type() != null ? request.type() : TransactionType.TRANSFER);
         transaction.setStatus(TransactionStatus.PENDING);
         transaction.setReferenceNumber(referenceNumber);
 
@@ -134,8 +134,9 @@ public class TransactionServiceImpl implements TransactionService {
     }
 
     @Override
+    @Transactional
     public TransactionResponse verifyOtp(OtpVerificationRequest request) {
-        // 1. Verify transaction exists and is currently in PENDING state
+        // 1. Verify transaction exists and is currently in PENDING_VERIFICATION state
         Transaction transaction = transactionRepository.findById(UUID.fromString(request.transactionId()))
                 .orElseThrow(() -> new IllegalArgumentException("Transaction not found"));
 
@@ -154,7 +155,11 @@ public class TransactionServiceImpl implements TransactionService {
         // same OTP twice)
         redisTemplate.delete("otp:" + request.transactionId());
 
-        // 4. SAGA Step 1: Deduct balance from sender account via OpenFeign
+        // 4. SAGA Step 1: Transition status to PROCESSING and deduct balance from
+        // sender account via OpenFeign
+        transaction.setStatus(TransactionStatus.PROCESSING);
+        transaction = transactionRepository.saveAndFlush(transaction);
+
         try {
             accountServiceClient.deductBalance(transaction.getSourceAccountNumber(),
                     new TransactionAmountRequest(transaction.getAmount()));
@@ -182,14 +187,17 @@ public class TransactionServiceImpl implements TransactionService {
                 kafkaTemplate.send(TRANSACTION_REFUNDED_TOPIC, transaction.getId().toString(),
                         new TransactionRefundedEvent(transaction.getId(), transaction.getSourceAccountNumber(),
                                 transaction.getAmount(), transaction.getFailureReason(), Instant.now()));
+                Transaction savedTransaction = transactionRepository.save(transaction);
+                log.info("Transaction {} successfully refunded after credit failure.", savedTransaction.getId());
+                return TransactionResponse.fromEntity(savedTransaction);
             } catch (Exception refundEx) {
                 log.error("CRITICAL: Failed to compensate/refund sender for transaction {}: {}",
                         transaction.getId(), refundEx.getMessage());
                 transaction.setStatus(TransactionStatus.FAILED);
                 transaction.setFailureReason("Settlement failed and compensation failed: " + refundEx.getMessage());
+                transactionRepository.save(transaction);
+                throw e;
             }
-            transactionRepository.save(transaction);
-            throw e;
         }
 
         // 6. Complete the transaction
@@ -208,5 +216,32 @@ public class TransactionServiceImpl implements TransactionService {
 
         log.info("Transaction {} successfully verified and settled via OTP.", savedTransaction.getId());
         return TransactionResponse.fromEntity(savedTransaction);
+    }
+
+    /**
+     * Helper method to fetch account details from Account Service via OpenFeign.
+     * Maps downstream FeignException.NotFound (404) to a descriptive
+     * IllegalArgumentException
+     * specifying whether the source or target account is missing, and handles
+     * downstream
+     * service unavailability gracefully.
+     */
+    private AccountResponse fetchAccount(String accountNumber, String role) {
+        AccountResponse account;
+        try {
+            account = accountServiceClient.getAccount(accountNumber);
+        } catch (FeignException.NotFound e) {
+            throw new IllegalArgumentException(role + " account not found: " + accountNumber);
+        } catch (FeignException e) {
+            log.error("Failed to communicate with Account Service for {} account [{}]: status={}",
+                    role, accountNumber, e.status(), e);
+            throw new IllegalStateException("Account service is temporarily unavailable. Please try again later.");
+        }
+
+        if (account == null) {
+            throw new IllegalArgumentException(role + " account not found: " + accountNumber);
+        }
+
+        return account;
     }
 }

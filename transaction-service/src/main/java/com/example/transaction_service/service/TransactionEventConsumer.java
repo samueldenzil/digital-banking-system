@@ -39,6 +39,8 @@ public class TransactionEventConsumer {
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final StringRedisTemplate redisTemplate;
 
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
     private static final String TRANSACTION_OTP_GENERATED_TOPIC = "transaction.otp.generated";
     private static final String FRAUD_DETECTED_TOPIC = "fraud.detected";
     private static final String FRAUD_CLEARED_TOPIC = "fraud.cleared";
@@ -70,7 +72,7 @@ public class TransactionEventConsumer {
         }
 
         // Generate 6-digit OTP and store in Redis with 5-minute TTL
-        String otp = String.format("%06d", new SecureRandom().nextInt(1_000_000));
+        String otp = String.format("%06d", SECURE_RANDOM.nextInt(1_000_000));
         redisTemplate.opsForValue().set("otp:" + transaction.getId(), otp, 5, TimeUnit.MINUTES);
 
         transaction.setStatus(TransactionStatus.PENDING_VERIFICATION);
@@ -104,11 +106,19 @@ public class TransactionEventConsumer {
             return;
         }
 
-        // Idempotency check: avoid double credit
-        if (transaction.getStatus() == TransactionStatus.SUCCESS) {
-            log.info("Transaction {} already settled. Skipping duplicate completion.", transaction.getId());
+        // Strict Idempotency Check: Only PENDING transactions can begin settlement.
+        // If already PROCESSING, SUCCESS, FAILED, or REFUNDED, abort immediately to
+        // prevent duplicate debit.
+        if (transaction.getStatus() != TransactionStatus.PENDING) {
+            log.info("Transaction {} is already in state {}. Skipping settlement to prevent duplicate execution.",
+                    transaction.getId(), transaction.getStatus());
             return;
         }
+
+        // Atomically transition and persist state to PROCESSING before making any
+        // remote calls
+        transaction.setStatus(TransactionStatus.PROCESSING);
+        transaction = transactionRepository.saveAndFlush(transaction);
 
         // Step 1: Deduct sender balance
         try {
