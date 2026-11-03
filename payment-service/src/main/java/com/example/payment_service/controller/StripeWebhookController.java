@@ -55,9 +55,7 @@ public class StripeWebhookController {
 
         switch (event.getType()) {
             case "payment_intent.succeeded" -> {
-                // Deserialize the event object into a PaymentIntent
-                PaymentIntent paymentIntent = (PaymentIntent) event.getDataObjectDeserializer().getObject()
-                        .orElse(null);
+                PaymentIntent paymentIntent = extractPaymentIntent(event);
 
                 if (paymentIntent != null) {
                     log.info("Payment succeeded for Intent: {}", paymentIntent.getId());
@@ -66,9 +64,7 @@ public class StripeWebhookController {
             }
 
             case "payment_intent.payment_failed" -> {
-                // Deserialize the event object into a PaymentIntent
-                PaymentIntent paymentIntent = (PaymentIntent) event.getDataObjectDeserializer().getObject()
-                        .orElse(null);
+                PaymentIntent paymentIntent = extractPaymentIntent(event);
 
                 if (paymentIntent != null) {
                     log.warn("Payment failed for Intent: {}", paymentIntent.getId());
@@ -86,5 +82,21 @@ public class StripeWebhookController {
 
         // 3. Always return 200 OK so Stripe knows the event was successfully received
         return ResponseEntity.ok("Received");
+    }
+
+    private PaymentIntent extractPaymentIntent(Event event) {
+        var deserializer = event.getDataObjectDeserializer();
+
+        if (deserializer.getObject().isPresent()) {
+            return (PaymentIntent) deserializer.getObject().get();
+        }
+
+        try {
+            // Fallback to force deserialization across API version differences
+            return (PaymentIntent) deserializer.deserializeUnsafe();
+        } catch (Exception e) {
+            log.error("Failed to deserialize PaymentIntent from event: {}", e.getMessage());
+            return null;
+        }
     }
 }

@@ -5,6 +5,11 @@ spring:
   application:
     name: payment-service
 
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../.env[.properties]
+
   # Database / Datasource Configuration
   datasource:
     url: jdbc:postgresql://localhost:5432/banking_db
@@ -55,5 +60,5 @@ management:
   endpoint:
     health:
       show-details: always
-      probes:
-        enabled: true
+    probes:
+      enabled: true

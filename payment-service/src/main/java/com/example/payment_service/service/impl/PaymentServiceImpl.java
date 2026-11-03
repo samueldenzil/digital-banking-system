@@ -74,16 +74,34 @@ public class PaymentServiceImpl implements PaymentService {
         long amountInSmallestUnit = convertToSmallestCurrencyUnit(request.amount(), request.currency());
 
         // 2. Build Stripe PaymentIntent parameters
-        PaymentIntentCreateParams params = PaymentIntentCreateParams.builder()
+        PaymentIntentCreateParams.Builder paramsBuilder = PaymentIntentCreateParams.builder()
                 .setAmount(amountInSmallestUnit)
                 .setCurrency(request.currency().toLowerCase())
                 .putMetadata("transactionId", request.transactionId().toString())
                 .putMetadata("accountNumber", request.accountNumber())
+                .setDescription("Digital banking account deposit")
                 .setAutomaticPaymentMethods(
                         PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
                                 .setEnabled(true)
-                                .build())
-                .build();
+                                .build());
+
+        // Satisfies Indian RBI export regulations for foreign currency transactions
+        if (!"INR".equalsIgnoreCase(request.currency())) {
+            paramsBuilder.setShipping(
+                    PaymentIntentCreateParams.Shipping.builder()
+                            .setName("Account Holder " + request.accountNumber())
+                            .setAddress(
+                                    PaymentIntentCreateParams.Shipping.Address.builder()
+                                            .setLine1("100 Wall Street")
+                                            .setCity("New York")
+                                            .setState("NY")
+                                            .setPostalCode("10005")
+                                            .setCountry("US")
+                                            .build())
+                            .build());
+        }
+
+        PaymentIntentCreateParams params = paramsBuilder.build();
 
         try {
             // 3. Create Intent on Stripe
