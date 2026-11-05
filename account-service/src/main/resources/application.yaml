@@ -7,9 +7,9 @@ spring:
 
   # Database / Datasource Configuration
   datasource:
-    url: jdbc:postgresql://localhost:5432/banking_db
-    username: postgres
-    password: postgres
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/banking_db}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
 
   # JPA / Hibernate Configuration
@@ -24,7 +24,7 @@ spring:
 
   # Apache Kafka Configuration
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
       group-id: account-service-group
       auto-offset-reset: earliest

@@ -1,0 +1,19 @@
+# Exclude Git and IDE metadata to keep the build context small and fast
+.git
+.gitignore
+.idea
+.vscode
+
+# Exclude source code and Maven wrappers (the pre-built JAR in target/ already has everything)
+src/
+.mvn/
+mvnw
+mvnw.cmd
+
+# Exclude temporary build artifacts inside target/ except the final runnable JAR
+target/classes/
+target/generated-sources/
+target/maven-status/
+target/test-classes/
+target/maven-archiver/
+

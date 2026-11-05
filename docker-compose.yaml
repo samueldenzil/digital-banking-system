@@ -60,6 +60,124 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+  # Account Service
+  account-service:
+    build:
+      context: ./account-service
+      dockerfile: Dockerfile
+    container_name: account-service
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/banking_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      - postgres
+      - kafka
+    networks:
+      - banking-network
+
+  # Transaction Service
+  transaction-service:
+    build:
+      context: ./transaction-service
+      dockerfile: Dockerfile
+    container_name: transaction-service
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/banking_db
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+    depends_on:
+      - postgres
+      - kafka
+      - redis
+      - account-service
+    networks:
+      - banking-network
+
+  # Payment Service
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/banking_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      STRIPE_API_KEY: ${STRIPE_API_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+    depends_on:
+      - postgres
+      - kafka
+    networks:
+      - banking-network
+
+  # Fraud Detection Service
+  fraud-detection-service:
+    build:
+      context: ./fraud-detection-service
+      dockerfile: Dockerfile
+    container_name: fraud-detection-service
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+    depends_on:
+      - kafka
+      - redis
+      - account-service
+    networks:
+      - banking-network
+
+  # Notification Service
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: notification-service
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      - kafka
+    networks:
+      - banking-network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      REDIS_HOST: redis
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+      TRANSACTION_SERVICE_URL: http://transaction-service:8082
+      PAYMENT_SERVICE_URL: http://payment-service:8083
+    depends_on:
+      - redis
+      - account-service
+      - transaction-service
+      - payment-service
+    networks:
+      - banking-network
+
 # Shared network
 networks:
   banking-network:
