@@ -9,149 +9,155 @@
 [![Docker](https://img.shields.io/badge/Docker_Compose-Enabled-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Stripe](https://img.shields.io/badge/Stripe-API_v2025-008CDD?style=for-the-badge&logo=stripe&logoColor=white)](https://stripe.com/)
 
-An enterprise-grade, distributed digital banking microservices platform designed for high throughput, strict financial consistency, and real-time fraud mitigation. Built with **Java 21**, **Spring Boot 4**, **Apache Kafka**, **PostgreSQL**, **Redis**, and **Docker Compose**, this project demonstrates core distributed systems patterns including **Choreography-based SAGA**, **Risk-Based Authentication (RBA) Step-Up MFA**, **Token Bucket Rate Limiting**, and **Asynchronous Webhook Processing**.
+A distributed banking backend built with Java 21, Spring Boot 4, Apache Kafka, PostgreSQL, and Redis. It handles account management, peer-to-peer transfers, Stripe card deposits, and automated fraud checks across six containerized services.
 
 ---
 
 ## Table of Contents
 
-- [System Architecture](#-system-architecture)
-- [Key Engineering Highlights & Design Patterns](#-key-engineering-highlights--design-patterns)
-  - [1. Distributed SAGA Orchestration (Event Choreography)](#1-distributed-saga-orchestration-event-choreography)
-  - [2. Risk-Based Authentication (RBA) & Step-Up MFA](#2-risk-based-authentication-rba--step-up-mfa)
-  - [3. Concurrency Control & Ledger Integrity](#3-concurrency-control--ledger-integrity)
-  - [4. Distributed Rate Limiting via Token Bucket](#4-distributed-rate-limiting-via-token-bucket)
-  - [5. Stripe Payment Gateway & Webhook Reconciliation](#5-stripe-payment-gateway--webhook-reconciliation)
-- [Microservices Ecosystem](#-microservices-ecosystem)
-- [Distributed Transaction Workflows](#-distributed-transaction-workflows)
-- [API Reference](#-api-reference)
-- [Getting Started & Local Deployment](#-getting-started--local-deployment)
-- [End-to-End Verification Walkthrough](#-end-to-end-verification-walkthrough)
+- [System Architecture](#system-architecture)
+- [Design Decisions](#design-decisions)
+  - [Distributed SAGA and Compensation](#distributed-saga-and-compensation)
+  - [Risk-Based Authentication and Step-Up MFA](#risk-based-authentication-and-step-up-mfa)
+  - [Concurrency Control and Idempotency](#concurrency-control-and-idempotency)
+  - [Rate Limiting](#rate-limiting)
+  - [Stripe Webhook Processing](#stripe-webhook-processing)
+- [Microservices Ecosystem](#microservices-ecosystem)
+- [Transaction Flow](#transaction-flow)
+- [API Reference](#api-reference)
+- [Local Deployment](#local-deployment)
+- [End-to-End Verification](#end-to-end-verification)
 
 ---
 
 ## System Architecture
 
-The architecture consists of six decoupled microservices, fronted by a reactive API Gateway and coordinated through an Apache Kafka event backbone:
+Six Spring Boot services run behind an API gateway, communicating synchronously through OpenFeign where immediate state checks are required and asynchronously through Kafka topics for events.
 
 ```mermaid
 flowchart TD
-    Client(["🌐 Client / Postman / Webhook"])
+    Client(["Client / Webhook"])
 
-    subgraph Edge ["Gateway & Security Edge"]
-        Gateway["⚡ API Gateway (:8080)<br/>Spring Cloud Gateway + Redis Token Bucket"]
+    subgraph Edge ["Gateway Edge"]
+        Gateway["API Gateway (:8080)<br/>Spring Cloud Gateway + Redis Token Bucket"]
     end
 
-    subgraph Services ["Core Microservices Cluster"]
-        AccountSvc["👤 Account Service (:8081)<br/>Ledger, Balances & Lifecycle"]
-        TxnSvc["💸 Transaction Service (:8082)<br/>SAGA Orchestration & MFA"]
-        PaymentSvc["💳 Payment Service (:8083)<br/>Stripe PaymentIntent & Webhooks"]
-        FraudSvc["🛡️ Fraud Detection Service (:8084)<br/>Velocity & Anomaly Rules Engine"]
-        NotifySvc["🔔 Notification Service (:8085)<br/>Multi-channel Alert Dispatcher"]
+    subgraph Services ["Core Services"]
+        AccountSvc["Account Service (:8081)<br/>Ledger, Balances, and Lifecycle"]
+        TxnSvc["Transaction Service (:8082)<br/>SAGA Orchestration and MFA"]
+        PaymentSvc["Payment Service (:8083)<br/>Stripe PaymentIntents and Webhooks"]
+        FraudSvc["Fraud Detection Service (:8084)<br/>Velocity and Drain Heuristics"]
+        NotifySvc["Notification Service (:8085)<br/>Kafka Event Consumer"]
     end
 
-    subgraph Infrastructure ["Infrastructure & State Storage"]
-        Postgres[("🐘 PostgreSQL (:5432)<br/>Isolated Schemas & Ledger")]
-        RedisCache[("⚡ Redis (:6379)<br/>Rate Limits & OTP TTL Store")]
-        KafkaBroker["📨 Apache Kafka (:9092 / :29092)<br/>Event-Driven Message Bus"]
-        Zookeeper["🦁 Apache Zookeeper (:2181)"]
-        StripeAPI["🌐 Stripe Cloud API"]
+    subgraph Data ["Data and Messaging"]
+        Postgres[("PostgreSQL (:5432)<br/>Service Databases")]
+        RedisCache[("Redis (:6379)<br/>Rate Limits and OTP Cache")]
+        KafkaBroker["Apache Kafka (:9092 / :29092)<br/>Event Bus"]
+        Zookeeper["Apache Zookeeper (:2181)"]
+        StripeAPI["Stripe API"]
     end
 
     Client -->|HTTP REST| Gateway
-    Client -.->|Webhook Signature| PaymentSvc
+    Client -.->|Webhook Post| PaymentSvc
 
-    Gateway -->|Proxy / Rate Limited| AccountSvc
-    Gateway -->|Proxy / Rate Limited| TxnSvc
-    Gateway -->|Proxy / Rate Limited| PaymentSvc
-    Gateway -.->|Check Token Bucket| RedisCache
+    Gateway -->|Forward| AccountSvc
+    Gateway -->|Forward| TxnSvc
+    Gateway -->|Forward| PaymentSvc
+    Gateway -.->|Check tokens| RedisCache
 
-    TxnSvc -->|OpenFeign RPC| AccountSvc
-    FraudSvc -->|OpenFeign RPC| AccountSvc
-    PaymentSvc <-->|SDK & Webhook Signature| StripeAPI
+    TxnSvc -->|OpenFeign| AccountSvc
+    FraudSvc -->|OpenFeign| AccountSvc
+    PaymentSvc <-->|SDK and Signatures| StripeAPI
 
     AccountSvc --> Postgres
     TxnSvc --> Postgres
     PaymentSvc --> Postgres
 
-    TxnSvc <-->|OTP Cache 5m TTL| RedisCache
-    FraudSvc <-->|Sliding Window Velocity| RedisCache
+    TxnSvc <-->|Cache OTP with 5m TTL| RedisCache
+    FraudSvc <-->|Sliding-window counters| RedisCache
 
     TxnSvc -->|Publish transaction.initiated| KafkaBroker
-    KafkaBroker -->|Subscribe transaction.initiated| FraudSvc
-    FraudSvc -->|Publish fraud.cleared / fraud.detected| KafkaBroker
-    KafkaBroker -->|Subscribe fraud.*| TxnSvc
-    KafkaBroker -->|Subscribe fraud.detected| NotifySvc
-    TxnSvc -->|Publish transaction.completed / refunded| KafkaBroker
-    KafkaBroker -->|Subscribe transaction.*| NotifySvc
-    PaymentSvc -->|Publish payment.completed / failed| KafkaBroker
-    KafkaBroker -->|Subscribe payment.*| NotifySvc
+    KafkaBroker -->|Subscribe| FraudSvc
+    FraudSvc -->|Publish fraud.cleared or fraud.detected| KafkaBroker
+    KafkaBroker -->|Subscribe| TxnSvc
+    KafkaBroker -->|Subscribe| NotifySvc
+    TxnSvc -->|Publish transaction.completed or refunded| KafkaBroker
+    KafkaBroker -->|Subscribe| NotifySvc
+    PaymentSvc -->|Publish payment.completed or failed| KafkaBroker
+    KafkaBroker -->|Subscribe| NotifySvc
 
     KafkaBroker --- Zookeeper
 ```
 
 ---
 
-## Key Engineering Highlights & Design Patterns
+## Design Decisions
 
-### 1. Distributed SAGA Orchestration (Event Choreography)
+### Distributed SAGA and Compensation
 
-- **Challenge**: Traditional two-phase commits (`2PC`) introduce distributed deadlocks and tight database coupling in microservices.
-- **Solution**: Implemented an asynchronous **Choreography-based SAGA** across `transaction-service`, `fraud-detection-service`, and `account-service`.
-- **Compensation**: If a destination credit or downstream validation fails after the sender account has already been debited, the SAGA immediately triggers a compensating transaction (`PUT /api/v1/accounts/{accountNumber}/refund`), restoring the sender's balance and publishing a `transaction.refunded` event for customer alerting.
+Instead of distributed transactions (2PC), which lock database rows across services and degrade availability, fund transfers run as an orchestrated SAGA across `transaction-service`, `fraud-detection-service`, and `account-service`.
 
-### 2. Risk-Based Authentication (RBA) & Step-Up MFA
+1. `transaction-service` creates a transfer record in `PENDING` state and emits `transaction.initiated`.
+2. `fraud-detection-service` runs heuristic checks. If clean, it emits `fraud.cleared`.
+3. `transaction-service` debits the sender via `PUT /api/v1/accounts/{accountNumber}/deduct`.
+4. `transaction-service` credits the recipient via `PUT /api/v1/accounts/{accountNumber}/credit`.
+5. If the credit step fails (network drop, recipient account closed), `transaction-service` executes a compensating refund (`PUT /api/v1/accounts/{accountNumber}/refund`), marks the transaction `REFUNDED`, and emits `transaction.refunded` so `notification-service` alerts the customer.
 
-- **Challenge**: Static authentication either creates friction for all users or leaves high-value transfers vulnerable to account takeovers.
-- **Solution**: Developed a multi-layered heuristic rule engine in `fraud-detection-service`:
-  1. **Velocity Check**: Detects rapid-fire transfers via Redis sliding-window counter (`max-transaction-per-minute: 5`).
-  2. **Historical Spike Analysis**: Flags transfers exceeding **5x** the customer's historical average amount.
-  3. **Balance Drain Detection**: Flags any single transfer attempting to drain **> 90%** of available funds.
-- **Adaptive Challenge**: Clean transfers settle immediately (<100ms). Suspicious transfers transition to `PENDING_VERIFICATION`, generating a cryptographically secure 6-digit OTP stored in Redis with a 5-minute TTL, while `notification-service` dispatches immediate security notices. The transfer settles only upon valid OTP submission (`POST /api/v1/transactions/verify-otp`).
+### Risk-Based Authentication and Step-Up MFA
 
-### 3. Concurrency Control & Ledger Integrity
+Rather than challenging every transfer with multi-factor authentication, `fraud-detection-service` evaluates risk on each `transaction.initiated` event:
 
-- **Double-Spending Prevention**: The balance debit and credit operations in `account-service` utilize JPA **Pessimistic Write Locking** (`@Lock(LockModeType.PESSIMISTIC_WRITE)`) at the SQL level (`SELECT ... FOR UPDATE`), eliminating race conditions during concurrent financial transfers.
-- **Idempotency Safeguard**: Fund transfer requests require client-provided `idempotencyKey` values. Duplicate network submissions return the existing transaction record without re-executing ledger mutations.
+- **Velocity check**: Uses Redis `INCR` with a 60-second sliding TTL to detect bursts over 5 transactions per minute.
+- **Historical average check**: Compares amount against customer history stored in Redis, flagging amounts over 5 times the running average.
+- **Balance drain check**: Flags any transfer exceeding 90% of available account balance.
 
-### 4. Distributed Rate Limiting via Token Bucket
+When flagged, the service emits `fraud.detected`. `transaction-service` holds the transfer in `PENDING_VERIFICATION`, generates a 6-digit OTP stored in Redis with a 5-minute TTL, and requests an SMS dispatch from `notification-service`. Funds do not move until the user submits the correct OTP via `POST /api/v1/transactions/verify-otp`.
 
-- Integrated **Spring Cloud Gateway** with **Redis** using the Reactive Token Bucket algorithm (`RequestRateLimiter`).
-- Implemented client IP resolution (`@ipKeyResolver`) enforcing strict throughput limits (`replenishRate: 10 req/s`, `burstCapacity: 20 req/s`) to protect backend services from denial-of-service and brute-force traffic.
+### Concurrency Control and Idempotency
 
-### 5. Stripe Payment Gateway & Webhook Reconciliation
+- **Pessimistic locking**: `account-service` uses JPA pessimistic write locks (`@Lock(LockModeType.PESSIMISTIC_WRITE)` mapping to `SELECT ... FOR UPDATE`) during balance deductions and credits. This serializes operations on the same account row, preventing negative balances and race conditions under concurrent requests.
+- **Idempotency keys**: `POST /api/v1/transactions` accepts an `idempotencyKey` header or payload field. Duplicate network submissions return the existing transaction record rather than executing a duplicate transfer.
 
-- Built an end-to-end card deposit integration with **Stripe PaymentIntents**.
-- Handled asynchronous fulfillment via `StripeWebhookController` with cryptographic signature verification (`Webhook.constructEvent(...)`) against timing attacks.
-- Persisted payment states (`PENDING` -> `COMPLETED` / `FAILED`) and broadcast `payment.completed` to Kafka for ledger crediting and notification dispatch.
+### Rate Limiting
+
+`api-gateway` enforces rate limits using Spring Cloud Gateway's reactive Redis token bucket filter (`RequestRateLimiter`). Traffic is keyed by remote IP (`ipKeyResolver`):
+
+- Account and transaction routes allow 10 requests per second with a burst capacity of 20.
+- Payment routes allow 5 requests per second with a burst capacity of 10.
+- Requests exceeding the bucket limit return HTTP `429 Too Many Requests`.
+
+### Stripe Webhook Processing
+
+Card deposits run through Stripe's PaymentIntent API. `payment-service` initiates the intent and returns a `client_secret` to the client.
+
+Final payment status is received via `POST /api/v1/payments/webhook`. The controller verifies the `Stripe-Signature` header using `Webhook.constructEvent(...)` with the configured webhook secret, protecting against forged events and timing attacks. Verified events update the payment record to `COMPLETED` and publish `payment.completed` to Kafka.
 
 ---
 
 ## Microservices Ecosystem
 
-| Service                       |  Port  | Primary Responsibilities                                                             | Tech Stack / Dependencies                               |
-| :---------------------------- | :----: | :----------------------------------------------------------------------------------- | :------------------------------------------------------ |
-| **`api-gateway`**             | `8080` | Unified routing, token-bucket rate limiting, actuator health probes                  | Spring Cloud Gateway WebFlux, Reactive Redis            |
-| **`account-service`**         | `8081` | Account lifecycle, balance queries, pessimistic ledger debit/credit, freeze/unfreeze | Spring Boot 4, Spring Data JPA, PostgreSQL, Hibernate   |
-| **`transaction-service`**     | `8082` | Distributed SAGA coordinator, idempotency checks, step-up OTP challenge              | Spring Boot 4, Spring Data JPA, OpenFeign, Kafka, Redis |
-| **`payment-service`**         | `8083` | Stripe PaymentIntent generation, webhook signature validation, payment queries       | Spring Boot 4, Stripe Java SDK, Kafka, PostgreSQL       |
-| **`fraud-detection-service`** | `8084` | Real-time risk scoring (velocity, spike, drain checks), Kafka routing                | Spring Boot 4, Spring Kafka, OpenFeign, Redis           |
-| **`notification-service`**    | `8085` | Multi-topic Kafka consumer, simulated SMS/Email alert dispatch                       | Spring Boot 4, Spring Kafka, Jackson 3 Type Inference   |
+| Service                   |  Port  | Responsibilities                                                                  | Key Dependencies                         |
+| :------------------------ | :----: | :-------------------------------------------------------------------------------- | :--------------------------------------- |
+| `api-gateway`             | `8080` | Reverse proxy routing, rate limiting, actuator health probes                      | Spring Cloud Gateway WebFlux, Redis      |
+| `account-service`         | `8081` | Account records, balance queries, pessimistic debits and credits, freeze/unfreeze | Spring Data JPA, PostgreSQL, Hibernate   |
+| `transaction-service`     | `8082` | Transfer SAGA orchestration, idempotency checks, step-up OTP challenge            | Spring Data JPA, OpenFeign, Kafka, Redis |
+| `payment-service`         | `8083` | Stripe PaymentIntent generation, webhook signature validation, payment records    | Stripe Java SDK, Kafka, PostgreSQL       |
+| `fraud-detection-service` | `8084` | Heuristic evaluation (velocity, spike, drain), risk event routing                 | Spring Kafka, OpenFeign, Redis           |
+| `notification-service`    | `8085` | Multi-topic Kafka consumer, SMS and email alert dispatch logging                  | Spring Kafka, Jackson 3                  |
 
-### Infrastructure Components
+### Infrastructure
 
-| Component        | Container Name |     Port(s)     | Role                                                                  |
-| :--------------- | :------------- | :-------------: | :-------------------------------------------------------------------- |
-| **PostgreSQL**   | `postgres`     |     `5432`      | Relational database with isolated schemas & persistent volume storage |
-| **Redis**        | `redis`        |     `6379`      | In-memory store for rate limiting counters and 5-min OTP TTL keys     |
-| **Apache Kafka** | `kafka`        | `9092`, `29092` | Distributed streaming platform for asynchronous SAGA & alert events   |
-| **Zookeeper**    | `zookeeper`    |     `2181`      | Cluster coordination and metadata management for Kafka                |
+| Container   | Image                             |        Ports         | Purpose                                                     |
+| :---------- | :-------------------------------- | :------------------: | :---------------------------------------------------------- |
+| `postgres`  | `postgres:latest`                 |     `5432:5432`      | Relational storage for accounts, transactions, and payments |
+| `redis`     | `redis:latest`                    |     `6379:6379`      | Token bucket rate limits and 5-minute OTP cache             |
+| `kafka`     | `confluentinc/cp-kafka:7.5.0`     | `9092:9092`, `29092` | Event messaging between services                            |
+| `zookeeper` | `confluentinc/cp-zookeeper:7.5.0` |     `2181:2181`      | Kafka cluster coordination                                  |
 
 ---
 
-## Distributed Transaction Workflows
-
-### Fund Transfer SAGA & Risk-Based Step-Up Flow
+## Transaction Flow
 
 ```mermaid
 sequenceDiagram
@@ -166,128 +172,116 @@ sequenceDiagram
     participant Notify as Notification Service (:8085)
 
     Alice->>Gateway: POST /api/v1/transactions ($750.00)
-    Gateway->>TxSvc: Forward Transaction Request
-    TxSvc->>AccSvc: Feign: Check Balance & Status (ACTIVE)
-    AccSvc-->>TxSvc: Account Valid ($800.00 Balance)
-    TxSvc->>TxSvc: Save Transaction (PENDING)
+    Gateway->>TxSvc: Forward request
+    TxSvc->>AccSvc: Check balance and ACTIVE status
+    AccSvc-->>TxSvc: Account valid ($800.00 balance)
+    TxSvc->>TxSvc: Save transaction (PENDING)
     TxSvc->>Kafka: Publish transaction.initiated
-    TxSvc-->>Alice: 201 Created (Status: PENDING)
+    TxSvc-->>Alice: 201 Created (status: PENDING)
 
     Kafka->>FraudSvc: Consume transaction.initiated
-    FraudSvc->>AccSvc: Feign: Fetch Account Profile
-    FraudSvc->>FraudSvc: Evaluate Heuristics (Exceeds 5x avg)
+    FraudSvc->>AccSvc: Fetch account profile
+    FraudSvc->>FraudSvc: Heuristic check (amount exceeds 5x average)
     FraudSvc->>Kafka: Publish fraud.detected
 
-    par Handle Fraud Alert
+    par Handle fraud alert
         Kafka->>TxSvc: Consume fraud.detected
-        TxSvc->>Redis: SET otp:<txId> "261430" (EX 300s)
-        TxSvc->>TxSvc: Update Status: PENDING_VERIFICATION
+        TxSvc->>Redis: SET otp:<txId> "261430" (TTL: 300s)
+        TxSvc->>TxSvc: Set status: PENDING_VERIFICATION
         TxSvc->>Kafka: Publish transaction.otp.generated
-    and Dispatch Customer Alert
-        Kafka->>Notify: Consume fraud.detected & otp.generated
-        Notify->>Notify: Dispatch SMS Security Alert + OTP (261430)
+    and Dispatch alert
+        Kafka->>Notify: Consume fraud.detected and otp.generated
+        Notify->>Notify: Log security alert and OTP dispatch
     end
-
-    Note over Alice,TxSvc: Step-Up Authentication Challenge
 
     Alice->>Gateway: POST /api/v1/transactions/verify-otp (OTP: 261430)
     Gateway->>TxSvc: Verify OTP
-    TxSvc->>Redis: GET & DEL otp:<txId> (Replay Prevention)
+    TxSvc->>Redis: GET and DEL otp:<txId>
     TxSvc->>AccSvc: PUT /accounts/Alice/deduct ($750.00)
     TxSvc->>AccSvc: PUT /accounts/Bob/credit ($750.00)
-    TxSvc->>TxSvc: Update Status: SUCCESS
+    TxSvc->>TxSvc: Set status: SUCCESS
     TxSvc->>Kafka: Publish transaction.completed
-    TxSvc-->>Alice: 200 OK (Status: SUCCESS)
+    TxSvc-->>Alice: 200 OK (status: SUCCESS)
 
     Kafka->>Notify: Consume transaction.completed
-    Notify->>Notify: Dispatch Debit Alert to Alice & Credit Alert to Bob
+    Notify->>Notify: Log debit alert (Alice) and credit alert (Bob)
 ```
 
 ---
 
 ## API Reference
 
-All requests can be routed through the central **API Gateway** on port `8080`.
+All requests route through the gateway on port `8080`.
 
-### 1. Account Service (`/api/v1/accounts`)
+### Account Service (`/api/v1/accounts`)
 
-| Method | Endpoint                                   | Description                                |  Sample Status   |
-| :----- | :----------------------------------------- | :----------------------------------------- | :--------------: |
-| `POST` | `/api/v1/accounts`                         | Create new bank account                    |  `201 Created`   |
-| `GET`  | `/api/v1/accounts/{accountNumber}`         | Retrieve account details & balance         |     `200 OK`     |
-| `GET`  | `/api/v1/accounts/customer/{customerId}`   | List accounts for customer portfolio       |     `200 OK`     |
-| `PUT`  | `/api/v1/accounts/{accountNumber}/block`   | Freeze account (blocks outgoing transfers) | `204 No Content` |
-| `PUT`  | `/api/v1/accounts/{accountNumber}/unblock` | Restore account to `ACTIVE` standing       | `204 No Content` |
-| `PUT`  | `/api/v1/accounts/{accountNumber}/deduct`  | SAGA: Deduct balance (Pessimistic Lock)    |     `200 OK`     |
-| `PUT`  | `/api/v1/accounts/{accountNumber}/credit`  | SAGA: Credit balance                       |     `200 OK`     |
-| `PUT`  | `/api/v1/accounts/{accountNumber}/refund`  | SAGA Compensation: Refund balance          |     `200 OK`     |
+| Method | Endpoint                                   | Description                                  |      Status      |
+| :----- | :----------------------------------------- | :------------------------------------------- | :--------------: |
+| `POST` | `/api/v1/accounts`                         | Create account                               |  `201 Created`   |
+| `GET`  | `/api/v1/accounts/{accountNumber}`         | Get account details and balance              |     `200 OK`     |
+| `GET`  | `/api/v1/accounts/customer/{customerId}`   | List accounts for customer                   |     `200 OK`     |
+| `PUT`  | `/api/v1/accounts/{accountNumber}/block`   | Freeze account (blocks outgoing transfers)   | `204 No Content` |
+| `PUT`  | `/api/v1/accounts/{accountNumber}/unblock` | Restore account to `ACTIVE`                  | `204 No Content` |
+| `PUT`  | `/api/v1/accounts/{accountNumber}/deduct`  | SAGA step: Deduct balance (pessimistic lock) |     `200 OK`     |
+| `PUT`  | `/api/v1/accounts/{accountNumber}/credit`  | SAGA step: Credit balance                    |     `200 OK`     |
+| `PUT`  | `/api/v1/accounts/{accountNumber}/refund`  | SAGA compensation: Refund balance            |     `200 OK`     |
 
-### 2. Transaction Service (`/api/v1/transactions`)
+### Transaction Service (`/api/v1/transactions`)
 
-| Method | Endpoint                                       | Description                                    | Sample Status |
-| :----- | :--------------------------------------------- | :--------------------------------------------- | :-----------: |
-| `POST` | `/api/v1/transactions`                         | Initiate fund transfer (SAGA trigger)          | `201 Created` |
-| `GET`  | `/api/v1/transactions/{id}`                    | Query single transaction state                 |   `200 OK`    |
-| `GET`  | `/api/v1/transactions/account/{accountNumber}` | Retrieve account transaction history statement |   `200 OK`    |
-| `POST` | `/api/v1/transactions/verify-otp`              | Submit step-up OTP to settle flagged transfer  |   `200 OK`    |
+| Method | Endpoint                                       | Description                           |    Status     |
+| :----- | :--------------------------------------------- | :------------------------------------ | :-----------: |
+| `POST` | `/api/v1/transactions`                         | Initiate transfer                     | `201 Created` |
+| `GET`  | `/api/v1/transactions/{id}`                    | Get transaction by ID                 |   `200 OK`    |
+| `GET`  | `/api/v1/transactions/account/{accountNumber}` | List transaction history for account  |   `200 OK`    |
+| `POST` | `/api/v1/transactions/verify-otp`              | Submit step-up OTP to settle transfer |   `200 OK`    |
 
-### 3. Payment Service (`/api/v1/payments`)
+### Payment Service (`/api/v1/payments`)
 
-| Method | Endpoint                                       | Description                                   | Sample Status |
-| :----- | :--------------------------------------------- | :-------------------------------------------- | :-----------: |
-| `POST` | `/api/v1/payments/initiate`                    | Create Stripe `PaymentIntent`                 | `201 Created` |
-| `POST` | `/api/v1/payments/webhook`                     | Stripe webhook listener (Signature verified)  |   `200 OK`    |
-| `GET`  | `/api/v1/payments/{id}`                        | Query payment record by ID                    |   `200 OK`    |
-| `GET`  | `/api/v1/payments/transaction/{transactionId}` | Reconcile payment via internal transaction ID |   `200 OK`    |
+| Method | Endpoint                                       | Description                                  |    Status     |
+| :----- | :--------------------------------------------- | :------------------------------------------- | :-----------: |
+| `POST` | `/api/v1/payments/initiate`                    | Create Stripe `PaymentIntent`                | `201 Created` |
+| `POST` | `/api/v1/payments/webhook`                     | Stripe webhook endpoint (signature verified) |   `200 OK`    |
+| `GET`  | `/api/v1/payments/{id}`                        | Get payment by ID                            |   `200 OK`    |
+| `GET`  | `/api/v1/payments/transaction/{transactionId}` | Get payment by transaction ID                |   `200 OK`    |
 
 ---
 
-## Getting Started & Local Deployment
+## Local Deployment
 
 ### Prerequisites
 
-- [Docker & Docker Compose](https://www.docker.com/) (Docker Desktop on Windows/macOS/Linux)
-- [Java 21 JDK](https://adoptium.net/) & [Maven 3.9+](https://maven.apache.org/) (optional if running pre-built images)
-- [Stripe CLI](https://stripe.com/docs/stripe-cli) (optional, for local webhook forwarding)
+- Docker and Docker Compose
+- Java 21 JDK and Maven 3.9+ (for building JAR files)
+- Stripe account keys (optional, needed only for card deposit tests)
 
-### 1. Clone & Configure Environment
-
-```bash
-git clone https://github.com/your-username/digital-banking-system.git
-cd digital-banking-system
-cp .env.example .env
-```
-
-_(Add your Stripe API Key and Webhook Secret in `.env` if testing card deposits)._
-
-### 2. Build Microservice JARs
+### 1. Build Service Packages
 
 ```bash
-# Package all microservices
 mvn clean package -DskipTests
 ```
 
-### 3. Launch Entire 10-Container Cluster
+### 2. Configure Environment
+
+Create a `.env` file in the project root:
+
+```env
+STRIPE_API_KEY=sk_test_your_key_here
+STRIPE_WEBHOOK_SECRET=whsec_your_secret_here
+```
+
+### 3. Start Containers
 
 ```bash
 docker-compose up --build -d
 ```
 
-### 4. Verify Cluster Health
-
-Check container status:
-
-```bash
-docker-compose ps
-```
-
-Probe the unified API Gateway health actuator:
+### 4. Verify Gateway Health
 
 ```bash
 curl http://localhost:8080/actuator/health
 ```
 
-**Response**:
+Expected output:
 
 ```json
 {
@@ -303,14 +297,12 @@ curl http://localhost:8080/actuator/health
 
 ---
 
-## End-to-End Verification Walkthrough
+## End-to-End Verification
 
-Follow these steps using `curl` (or Postman) to test the platform through the gateway:
-
-### Step 1: Create Sender (Alice) and Receiver (Bob)
+### 1. Create Sender and Receiver Accounts
 
 ```bash
-# Create Alice with $1000 initial balance
+# Create Alice ($1000 balance)
 curl -X POST http://localhost:8080/api/v1/accounts \
   -H "Content-Type: application/json" \
   -d '{
@@ -322,7 +314,7 @@ curl -X POST http://localhost:8080/api/v1/accounts \
     "type": "SAVINGS"
   }'
 
-# Create Bob with $200 initial balance
+# Create Bob ($200 balance)
 curl -X POST http://localhost:8080/api/v1/accounts \
   -H "Content-Type: application/json" \
   -d '{
@@ -335,7 +327,7 @@ curl -X POST http://localhost:8080/api/v1/accounts \
   }'
 ```
 
-### Step 2: Execute Clean Peer-to-Peer Transfer ($100.00)
+### 2. Standard Transfer ($100.00)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/transactions \
@@ -345,17 +337,16 @@ curl -X POST http://localhost:8080/api/v1/transactions \
     "targetAccountNumber": "<BOB_ACCOUNT_NUMBER>",
     "amount": 100.00,
     "currency": "USD",
-    "description": "Lunch reimbursement",
-    "idempotencyKey": "txn-clean-001"
+    "description": "Lunch transfer",
+    "idempotencyKey": "txn-001"
   }'
 ```
 
-_Flow_: Initiated → Fraud Check Cleared → Balance Deducted & Credited (<100ms) → Alerts Dispatched.
+The transfer is evaluated as low risk, debits Alice, credits Bob, and completes within 100 ms.
 
-### Step 3: Trigger Fraud Detection & Step-Up MFA Challenge ($750.00)
+### 3. High-Risk Transfer and Step-Up MFA Challenge ($750.00)
 
 ```bash
-# Alice transfers $750.00 (>90% of her remaining $900 balance)
 curl -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
   -d '{
@@ -363,20 +354,21 @@ curl -X POST http://localhost:8080/api/v1/transactions \
     "targetAccountNumber": "<BOB_ACCOUNT_NUMBER>",
     "amount": 750.00,
     "currency": "USD",
-    "description": "High value transfer",
-    "idempotencyKey": "txn-fraud-001"
+    "description": "Large transfer",
+    "idempotencyKey": "txn-002"
   }'
 ```
 
-_Response_: `"status": "PENDING"`.  
-Inspect `transaction-service` logs to see the generated OTP:
+Because the amount exceeds 5 times the running average and drains over 90% of Alice's remaining balance, the transaction returns status `PENDING` and moves to `PENDING_VERIFICATION` in the background.
+
+Retrieve the generated OTP from `transaction-service` logs:
 
 ```bash
 docker-compose logs --tail=20 transaction-service
-# Log: Step-Up Challenge: Generated OTP for flagged transaction <TX_ID>: 261430
+# Finds log: Step-Up Challenge: Generated OTP for flagged transaction <TX_ID>: 261430
 ```
 
-### Step 4: Authorize and Settle Transfer with OTP
+### 4. Settle Flagged Transfer with OTP
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/transactions/verify-otp \
@@ -387,15 +379,15 @@ curl -X POST http://localhost:8080/api/v1/transactions/verify-otp \
   }'
 ```
 
-_Result_: Transfer transitions to `SUCCESS`. Alice balance drops to `$50.00`, Bob balance becomes `$1,050.00`.
+Response returns status `SUCCESS`. Alice balance drops to `$50.00`, and Bob balance updates to `$1,050.00`.
 
-### Step 5: Test Security Freeze / Block
+### 5. Account Freeze and Transfer Block
 
 ```bash
 # Freeze Alice's account
 curl -X PUT http://localhost:8080/api/v1/accounts/<ALICE_ACCOUNT_NUMBER>/block
 
-# Attempt transfer while frozen -> Returns 400 Bad Request ("Source or target account is not active")
+# Attempt transfer while frozen (returns 400 Bad Request)
 curl -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
   -d '{
@@ -403,7 +395,7 @@ curl -X POST http://localhost:8080/api/v1/transactions \
     "targetAccountNumber": "<BOB_ACCOUNT_NUMBER>",
     "amount": 10.00,
     "currency": "USD",
-    "description": "Blocked test"
+    "description": "Frozen test"
   }'
 
 # Unfreeze account
